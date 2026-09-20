@@ -1,0 +1,4 @@
+Name: search-api
+Host: 0.0.0.0
+Port: 8005
+Domain: search
