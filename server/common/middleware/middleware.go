@@ -15,10 +15,3 @@ func CORS(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
-// Auth 是登录态校验的占位实现。
-// 骨架阶段不做鉴权；按 identity/auth 规范，受保护接口必须在服务端校验登录态，
-// 该逻辑将在认证相关变更中落地，届时此处替换为真实校验。
-func Auth(next http.HandlerFunc) http.HandlerFunc {
-	return next
-}

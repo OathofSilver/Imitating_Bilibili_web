@@ -25,7 +25,8 @@ func main() {
 	server := rest.MustNewServer(c.RestConf)
 	defer server.Stop()
 
-	svcCtx := svc.NewServiceContext(c.Domain)
+	svcCtx := svc.NewServiceContext(c)
+	defer svcCtx.Close()
 	server.AddRoute(rest.Route{
 		Method:  http.MethodGet,
 		Path:    "/api/v1/search/health",

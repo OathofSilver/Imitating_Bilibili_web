@@ -1,4 +1,18 @@
 Name: search-api
 Host: 0.0.0.0
-Port: 8005
+Port: 18005
 Domain: search
+
+# 存储与鉴权配置：口令与密钥一律由环境变量注入，不写入本文件。
+#   MYSQL_PASSWORD / REDIS_PASSWORD / JWT_SECRET
+# 其余项可用环境变量覆盖：MYSQL_ADDR、MYSQL_USER、MYSQL_DATABASE、REDIS_ADDR、REDIS_DB、JWT_TTL_HOURS
+# 说明：Mysql 段本域当前不消费（无数据表），保留以维持五域配置一致。
+Mysql:
+  Addr: 127.0.0.1:13306
+  Database: bilibili_web
+
+Redis:
+  Addr: 127.0.0.1:6379
+
+Auth:
+  TokenTTLHours: 168

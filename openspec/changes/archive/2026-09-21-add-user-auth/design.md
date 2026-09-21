@@ -118,6 +118,58 @@ Redis 键形如 `bw:v1:auth:ver:<uid>`，读写时设置 TTL 为凭证有效期�
 - **理由**：refresh token 的价值在于「短 access 寿命 + 免打扰续期」，而本项目已用 Redis 版本号覆盖了撤销需求，引入双凭证会把前端请求层的重试与并发刷新逻辑复杂度抬高一个层级，与「简单鉴权」的目标相悖。
 - **备选方案**：access + refresh 双凭证 → 保留为后续演进方向；届时 `identity/auth` 的「登录态签发与携带」需要以 delta 修订。
 
+### 决策 9：仓库内不出现任何可用凭据字面量，开发凭据由环境变量与不入库的 `.env` 提供
+
+任务 1.3 的验收要求「在 `server/` 内检索不到明文连接串或密钥字面量」。第一阶段结束时审计发现三类残留，逐一消除：
+
+| 残留 | 处理 |
+| --- | --- |
+| `deploy/docker-compose.yaml` 的 `MYSQL_ROOT_PASSWORD: root` 与 healthcheck 里的 `-proot` | 改为 `${MYSQL_ROOT_PASSWORD:-${MYSQL_PASSWORD:?...}}`；healthcheck 改用 `CMD-SHELL` 并引用容器内的 `$MYSQL_ROOT_PASSWORD`。口令落 `deploy/.env`（已 gitignore），模板为 `deploy/.env.example`。 |
+| 五份 `etc/*.yaml` 的 `User: root` | 删除该行；`MysqlConf.User` 的默认值一并移除，账号与口令统一由 `MYSQL_USER` / `MYSQL_PASSWORD` 注入。 |
+| `usersmodel_test.go` 与 `store_test.go` 内的 `root:root@...` 连接串字面量 | model 测试的连接串改为完全由 `BW_TEST_MYSQL_DSN` 提供；`store_test.go` 的假连接串改为由 `sampleDSN()` 拼装。 |
+
+- **理由**：这三类残留里只有第一类是真凭据，第二类是「仓库内出现可用的默认账号」的坏习惯，第三类虽非真实凭据但会污染检索结果、让「是否还有明文凭据」这个问题永远答不清楚。既然验收项写的是字面归零，就应当真正做到——否则这条验收在后续每次回归时都要重新解释一遍。
+- **代价**：`go test ./app/user/model/...` 在未设置 `BW_TEST_MYSQL_DSN` 时全部跳过（即默认的 `go test ./...` 不再覆盖 model 层）。补偿方式是在 `Makefile` 增加 `test` 目标，由它统一拼出该变量：
+  `BW_TEST_MYSQL_DSN='$(MYSQL_USER):$(MYSQL_PASSWORD)@tcp($(MYSQL_ADDR))/$(MYSQL_DATABASE)?...'`。
+  开发时用 `make test` 即可获得完整覆盖，与 `make up` 共用同一份凭据来源，不会出现两处口令不一致。
+- **备选方案**：保留默认值 + 仅把 compose 口令外移 → 否决。会让第一条验收长期停留在「按意图解释」的状态，而这类模糊验收是最容易在评审时变成争议项的东西。
+
+### 决策 10：go-zero rest 的路径参数用 `pathvar.Vars`，不用标准库 `PathValue`
+
+`GET /api/v1/user/users/{id}` 需要读取路径参数。实现时先用了标准库的 `http.Request.PathValue("id")`，实测**始终返回空串**——go-zero v1.10.3 的 `rest` 使用自己的路由树，路径参数写入 `rest/pathvar` 的私有上下文键（`pathvar.WithVars`），标准库 API 取不到，且失败是静默的（返回空串而非报错）。
+
+统一改用 `github.com/zeromicro/go-zero/rest/pathvar` 的 `Vars(r)`。这条差异值得写进设计而不是只修代码：它属于「看起来会工作、实际静默失效」的一类，若将来有人按标准库习惯写新接口，会重复踩到。
+
+- **理由**：go-zero 没有暴露 `PathValue` 的兼容适配，用它的 API 是唯一正确途径。
+- **代价**：`handler` 层多一个框架依赖。可接受——该包的 handler 本就依赖 go-zero 的 `rest.Route`。
+
+### 决策 11：注册响应的时间字段依赖 `Insert` 路径的填充，不改 model 层
+
+`users` 表的 `created_at` / `updated_at` 由 MySQL 的 `DEFAULT CURRENT_TIMESTAMP` 生成，而 goctl 生成的 `Insert` 列清单**不含这两列**（`usersRowsExpectAutoSet` 把时间列移除了）。
+
+实施过程中先观察到注册响应里 `created_at` 为 `0001-01-01T00:00:00Z`（零值），一度据此认为需要额外回读。**但重启服务重新验证后，同一接口返回的是正确的当前时间**——前一次观察是改动过程中对着旧二进制发的请求，属于观察错误。
+
+最终结论：`Insert` 路径上时间字段确实被填充，**不做额外回读、不自定义 `Insert`**，保持 model 层与 goctl 生成物一致。任务 4.2 的端到端链路覆盖了该字段的正确性。
+
+- **理由**：不为了一个已被证伪的问题引入额外查询或改写生成物。model 层越贴近 goctl 输出，后续重新生成时越不容易冲突（决策 4 已把定制面收敛到四处）。
+- **风险**：该行为依赖驱动与 MySQL 版本，若将来变化，注册响应的时间会变成零值而不会报错。缓解：端到端链路的步骤 3 会直接暴露这个问题。
+- **教训**：这一处曾因「对着未重启的服务发请求」得出错误结论。验证接口行为前必须先确认服务进程已被替换（本机表现为端口被旧 PID 占用、新进程 `bind` 失败而 panic）。
+
+### 决策 12：logic 层的依赖以「调用方定义的窄接口」注入，不用 model 的接口
+
+任务 2.11 要求「外部依赖以接口注入」。但 `model.UsersModel` 含一个未导出的 `withSession(session sqlx.Session) UsersModel` 方法——**含未导出方法的接口无法在声明包之外被实现**，因此测试无法为它提供替身。
+
+处理方式：在 `svc` 包按「调用方实际需要什么」声明三个窄接口：
+- `UserRepository`：只含 logic 真正调用的 `Insert` / `FindOne` / `FindOneByUsername` / `UpdateProfile` 四个方法
+- `SessionStore`：`Current` / `Bump` / `Matches`
+- `TokenIssuer`：`Issue` / `Parse` / `TTL`
+
+`ServiceContext` 的字段声明为接口类型，并用编译期断言 `_ UserRepository = model.UsersModel(nil)` 保证真实 model 仍满足它。
+
+- **理由**：Go 的惯例是接口由调用方而非实现方定义。这么做的副作用正好是本变更需要的——logic 层对 model 的依赖面从「整个 `UsersModel`」收缩到四个方法，评审时可以直接看出「业务层到底碰了哪几个数据操作」；同时测试不必拉起数据库（任务 2.11 的 55 个用例全部在内存替身上跑完，耗时不足 1 秒）。
+- **代价**：新增 model 方法时，若 logic 要用，需同步扩 `UserRepository`。这个摩擦是有益的——它让「业务层又碰了一张表/又用了一个数据操作」成为评审可见的变更。
+- **备选方案**：为测试改用真实 MySQL → 否决，会让 logic 层单元测试依赖中间件，也无法构造「唯一索引冲突」「会话存储故障」等分支；把 `withSession` 导出 → 否决，未导出是有意的（它只服务于事务内部组合，不应成为对外契约）。
+
 ## Risks / Trade-offs
 
 - **每个受保护请求多一次 Redis 读取** → 缓解：读取是单键 GET，成本可控；Redis 与各域同机部署。若后续成为瓶颈，可在各域加秒级本地缓存「版本号未变更」的结论，本变更不实现。
@@ -130,6 +182,7 @@ Redis 键形如 `bw:v1:auth:ver:<uid>`，读写时设置 TTL 为凭证有效期�
 - **goctl 生成的 CRUD 语义与基线规范有四处冲突，容易被直接沿用** → 缓解：冲突点与覆盖要求在决策 4 中逐条列明，并作为任务 1.6 的显式交付内容；物理删除的 `Delete` 被覆盖而非弃用，以消除误调入口。
 - **重复键判定依赖 MySQL 错误码 1062 这一具体驱动行为** → 缓解：判定逻辑收敛在 model 层单点，更换驱动只需改一处；并编写单元测试覆盖该分支。
 - **五域同时接入 Redis 使配置变多** → 缓解：配置项与构造调用在 `common/` 统一定义，各域只有三行配置与一次构造。
+- **依赖真实 MySQL 的 model 测试在默认 `go test ./...` 下会被跳过** → 缓解：`Makefile` 的 `test` 目标负责拼出 `BW_TEST_MYSQL_DSN`，开发机执行 `make test` 即得完整覆盖；这与「仓库内不得出现凭据字面量」是同一取舍的两面（决策 9）。
 - **bcrypt 的哈希计算是 CPU 密集操作** → 缓解：注册/登录是低频接口，可接受；不将 bcrypt 用于任何高频路径。
 - **建表脚本缺乏迁移框架，后续表结构变更无版本记录** → 缓解：脚本以 `deploy/` 下的可重放 SQL 形式存在，后续引入正式迁移工具时以其为初始版本。
 
@@ -169,7 +222,7 @@ Redis 键形如 `bw:v1:auth:ver:<uid>`，读写时设置 TTL 为凭证有效期�
 | `backend/architecture` | 对外路径按业务域划分 | 符合。全部接口位于 `/api/v1/user/`。 |
 | `backend/architecture` | 跨服务调用必须走 RPC | 不适用。本变更不跨域取数据；凭证校验走共享密钥与共享 Redis，不属于「取另一业务域的数据」。 |
 | `backend/architecture` | 服务按业务域划分 | 符合。鉴权能力归入用户域，未新建域。 |
-| `backend/architecture` | 配置外部化与环境隔离 | 符合。数据库、Redis、密钥全部走 `etc/*.yaml` 与环境变量，代码内无明文连接串与密钥。 |
+| `backend/architecture` | 配置外部化与环境隔离 | 符合。数据库、Redis、密钥全部走 `etc/*.yaml` 与环境变量；`server/` 内无明文连接串与密钥字面量（决策 9），开发凭据落在不入库的 `deploy/.env`。 |
 | `backend/architecture` | 错误逐层包装且不得吞掉 | 符合。model 层错误向上包装，对外映射为统一错误码，不暴露内部细节。 |
 | `data/platform` | 全局 ID 由 Snowflake 生成 | 符合。`users.id` 由既有 `common/snowflake` 生成，非自增。 |
 | `data/platform` | MySQL 建模与软删除约定 | 符合，但需覆盖生成代码。表含 `created_at`/`updated_at`/`deleted_at`；goctl 生成的 `Delete` 是物理删除、`FindOne*` 不带软删除过滤，二者已在 `customUsersModel` 中覆盖（决策 4）。 |
@@ -183,6 +236,24 @@ Redis 键形如 `bw:v1:auth:ver:<uid>`，读写时设置 TTL 为凭证有效期�
 | `frontend/conventions` | 路由与访问守卫 | 符合。守卫在 `app` 集中声明，未登录跳转登录并保留原目标地址；权限判定仍在服务端。 |
 | `frontend/conventions` | 主题与样式约束 | 符合。表单与按钮样式使用 Mantine 主题 token，无硬编码色值。 |
 | `frontend/conventions` | 类型与接口封装 | 符合。请求与响应类型定义于 `types/` 并在 `api/` 封装，页面不直接调用 fetch。 |
-| `quality/testing` | 全部 | 符合。每个任务在 tasks.md 中携带可验证的验收步骤；后端逻辑以接口注入依赖以便测试。 |
+| `quality/testing` | 全部 | 符合。每个任务在 tasks.md 中携带可验证的验收步骤；后端逻辑以接口注入依赖（决策 12）。 |
 
 **核对结论：无违反项，无需 MODIFIED delta。**
+
+第二轮核对（第二阶段完成后）补充确认：
+
+- `identity/auth`「登录态撤销」的「撤销记录生命周期」场景：键 TTL 实测为 1209587 秒（≈14 天 = 2× 凭证有效期），与决策 2 一致，且用户登出后键继续被重置，不会提前过期。
+- `identity/auth`「登录凭据校验」的「用户名不存在与密码错误返回一致」：两处响应实测为逐字节相同（`{"code":40100,"message":"未认证","data":null}`）。
+- `identity/profile`「本人资料修改」的「请求体包含不可变字段」：实测提交 `username` 返回 `40001` 且昵称保持原值；同时提交 `role` 与 `level` 时一次性列出两个越界字段。
+- `api/contract`「统一响应结构」：六个接口的成功与失败响应均为 `{code, message, data}`。
+- 新增约束（本变更自行引入，非基线要求）：`svc` 包的 `UserRepository` / `SessionStore` / `TokenIssuer` 三个接口是决策 12 的产物。
+
+第三轮核对（第三阶段前端完成后）补充确认：
+
+- `frontend/conventions`「类型与接口封装」：`pages/` 与 `features/` 内检索不到直接调用的 `fetch`（全仓唯一 `fetch` 在 `api/http.ts`）；请求与响应类型定义于 `types/auth.ts` 与 `types/api.ts`，`pnpm tsc --noEmit` 通过且无 `any`。
+- `frontend/conventions`「状态管理边界」：仅登录态进入 Zustand（`useAuthStore`），凭证读写独立成 `api/credential.ts` 以避免 api 与 store 循环依赖。
+- `frontend/conventions`「路由与访问守卫」：守卫在 `app/RequireAuth.tsx` 集中声明于路由树内，未登录跳转登录并经 `features/auth/redirect.ts` 保留原目标（站内路径校验排除 `//` 协议相对地址）。
+- `frontend/conventions`「主题与样式约束」：`web/src` 内检索不到十六进制/RGB 色值字面量，颜色一律取 Mantine 主题 token（`c="pink"`、`color="red"` 等）。
+- `identity/auth`「凭证的携带方式与跨域一致性」：`api/http.ts` 统一注入 `Authorization: Bearer <token>`，收到 `40100` 时清除本地凭证并经组合根回调（`AuthBootstrap` → store.clear）使守卫跳转登录。
+- `identity/profile`「本人资料修改」：`ProfileForm` 逐字段比对、只提交变更字段，白名单外字段在前端不出现；提交成功后由 store 回写并以服务端值为准重初始化表单。
+- 构建验证：`pnpm build` 通过（773 modules，产物含 dist/）。
