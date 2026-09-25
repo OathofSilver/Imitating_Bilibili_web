@@ -1,6 +1,6 @@
 .PHONY: help up down dev dev-web dev-server health test
 
-DOMAINS := user video interaction comment search
+DOMAINS := user video interaction comment search social
 
 # 本机只有独立版 docker-compose；若环境支持插件版，可用 make up COMPOSE="docker compose"
 # 独立版会读取 server/deploy/.env（模板见同目录 .env.example），因此 compose 中不写口令字面量。
@@ -46,6 +46,8 @@ dev-web:
 	pnpm -C web dev
 
 dev-server:
+	@echo "starting user-rpc"
+	(cd server/app/user/rpc && go run . > /dev/null 2>&1 &)
 	@for d in $(DOMAINS); do \
 		echo "starting $$d-api"; \
 		(cd server/app/$$d/api && go run . > /dev/null 2>&1 &) ; \
@@ -57,6 +59,7 @@ health:
 	@curl -s --max-time 3 http://127.0.0.1:18003/api/v1/interaction/health; echo
 	@curl -s --max-time 3 http://127.0.0.1:18004/api/v1/comment/health; echo
 	@curl -s --max-time 3 http://127.0.0.1:18005/api/v1/search/health; echo
+	@curl -s --max-time 3 http://127.0.0.1:18006/api/v1/social/health; echo
 
 test:
 	@cd server && go test -p 1 ./...
