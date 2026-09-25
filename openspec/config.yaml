@@ -1,0 +1,36 @@
+schema: spec-driven
+
+context: |
+  Language: Simplified Chinese
+  All artifacts must be written in Simplified Chinese.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Project: 单体部署的类哔哩哔哩（bilibili）Web 端全栈项目。后端为 Go + Gin 单进程，前端为 React 18 + TypeScript + Vite 7 + Mantine + Zustand 单页应用。
+  Middleware: MySQL（主数据）、Redis 与进程内缓存 go-cache（多级缓存）、RabbitMQ（异步）、Elasticsearch + IK 中文分词（检索，go-elasticsearch v8）。
+  Project positioning and non-goals: see openspec/project.md.
+  Engineering constraints are defined by the eight baseline capabilities under openspec/specs/:
+  backend/layering, backend/coding, api/contract, data/platform, web/conventions, quality/testing, delivery/git, delivery/ci.
+  Every change MUST stay consistent with those baselines.
+
+  三条不可协商的铁律：
+  1. 对外标识必须序列化为字符串，禁止以 64 位整数直接返回（超出前端安全整数范围会静默丢精度）。
+  2. 数据库事务内禁止任何数据库之外的 I/O，包括缓存、消息投递、检索写入与 HTTP 调用。
+  3. 禁止直接序列化持久化实体作为对外响应，必须经显式 DTO 转换。
+
+rules:
+  proposal:
+    - 必须列出本次变更所触及的基线能力（openspec/specs/ 下的 capability），并在 design.md 中逐条核对
+    - 确实需要偏离基线时，必须以增量方式显式修改对应基线能力并在 proposal 中说明原因，禁止在实现中静默绕开
+    - 必须写明 Non-goals 或说明本变更不涉及新增能力边界
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
